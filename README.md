@@ -1,77 +1,224 @@
-# gitlab-ha
-graph TB
-  %% External Access
-  Internet([Internet/Users]) --> VIP[Virtual IP<br/>192.168.1.100]
-  
-  %% Load Balancer Layer
-  VIP --> LB1[Load Balancer 1<br/>192.168.1.5<br/>HAProxy + Keepalived<br/>MASTER]
-  VIP --> LB2[Load Balancer 2<br/>192.168.1.6<br/>HAProxy + Keepalived<br/>BACKUP]
-  
-  %% GitLab Application Layer
-  LB1 --> APP1[GitLab App 1<br/>192.168.1.10<br/>gitlab/gitlab-ce:18.7.0-ce.0]
-  LB1 --> APP2[GitLab App 2<br/>192.168.1.20<br/>gitlab/gitlab-ce:18.7.0-ce.0]
-  LB1 --> APP3[GitLab App 3<br/>192.168.1.21<br/>gitlab/gitlab-ce:18.7.0-ce.0]
-  
-  LB2 --> APP1
-  LB2 --> APP2
-  LB2 --> APP3
-  
-  %% Database Layer
-  APP1 --> DB1[PostgreSQL Primary<br/>192.168.1.30<br/>postgres:18.1-alpine<br/>Port: 5432]
-  APP2 --> DB1
-  APP3 --> DB1
-  
-  DB1 --> DB2[PostgreSQL Replica<br/>192.168.1.31<br/>postgres:18.1-alpine<br/>Port: 5433]
-  
-  %% Redis Cache Layer
-  APP1 --> REDIS1[Redis Master<br/>192.168.1.40<br/>redis:7.4.7-alpine<br/>Port: 6379]
-  APP2 --> REDIS1
-  APP3 --> REDIS1
-  
-  REDIS1 --> REDIS2[Redis Slave 1<br/>192.168.1.41<br/>redis:7.4.7-alpine]
-  REDIS1 --> REDIS3[Redis Slave 2<br/>192.168.1.42<br/>redis:7.4.7-alpine]
-  
-  %% Object Storage Layer
-  APP1 --> MINIO1[MinIO Node 1<br/>192.168.1.60<br/>minio:RELEASE.2025-01-15T09-52-05Z]
-  APP2 --> MINIO2[MinIO Node 2<br/>192.168.1.61<br/>minio:RELEASE.2025-01-15T09-52-05Z]
-  APP3 --> MINIO3[MinIO Node 3<br/>192.168.1.62<br/>minio:RELEASE.2025-01-15T09-52-05Z]
-  
-  MINIO1 --> MINIO4[MinIO Node 4<br/>192.168.1.63<br/>minio:RELEASE.2025-01-15T09-52-05Z]
-  MINIO2 --> MINIO4
-  MINIO3 --> MINIO4
-  
-  %% Shared Storage Layer
-  APP1 --> NFS1[NFS Server<br/>192.168.1.50<br/>Shared Storage<br/>/srv/gitlab/shared<br/>/srv/gitlab/builds]
-  APP2 --> NFS1
-  APP3 --> NFS1
-  
-  %% GitLab Runners Layer
-  APP1 --> RUNNER1[GitLab Runner 1<br/>192.168.1.90<br/>gitlab-runner:18.7.0<br/>Docker Executor]
-  APP2 --> RUNNER2[GitLab Runner 2<br/>192.168.1.91<br/>gitlab-runner:18.7.0<br/>Docker Executor]
-  APP3 --> RUNNER3[GitLab Runner 3<br/>192.168.1.92<br/>gitlab-runner:18.7.0<br/>Docker Executor]
-  
-  %% Docker-in-Docker for Runners
-  RUNNER1 --> DIND1[Docker-in-Docker<br/>docker:24.0-dind]
-  RUNNER2 --> DIND2[Docker-in-Docker<br/>docker:24.0-dind]
-  RUNNER3 --> DIND3[Docker-in-Docker<br/>docker:24.0-dind]
-  
-  %% Styling
-  classDef loadbalancer fill:#ff6b6b,stroke:#333,stroke-width:2px,color:#fff
-  classDef gitlab fill:#fc6d26,stroke:#333,stroke-width:2px,color:#fff
-  classDef database fill:#336791,stroke:#333,stroke-width:2px,color:#fff
-  classDef redis fill:#dc382d,stroke:#333,stroke-width:2px,color:#fff
-  classDef minio fill:#c72e49,stroke:#333,stroke-width:2px,color:#fff
-  classDef nfs fill:#4caf50,stroke:#333,stroke-width:2px,color:#fff
-  classDef runner fill:#ffa726,stroke:#333,stroke-width:2px,color:#fff
-  classDef external fill:#9c27b0,stroke:#333,stroke-width:2px,color:#fff
-  classDef vip fill:#2196f3,stroke:#333,stroke-width:3px,color:#fff
-  
-  class Internet external
-  class VIP vip
-  class LB1,LB2 loadbalancer
-  class APP1,APP2,APP3 gitlab
-  class DB1,DB2 database
-  class REDIS1,REDIS2,REDIS3 redis
-  class MINIO1,MINIO2,MINIO3,MINIO4 minio
-  class NFS1 nfs
-  class RUNNER1,RUNNER2,RUNNER3,DIND1,DIND2,DIND3 runner
+# GitLab High Availability (HA) Deployment
+
+This repository contains Ansible playbooks for deploying a complete **production-ready GitLab HA environment** using Docker Compose. The setup provides high availability, load balancing, and scalable CI/CD infrastructure.
+
+## 🏗️ Architecture Overview
+
+```
+Internet/Users
+    ↓
+Virtual IP (192.168.1.100)
+    ↓
+┌─────────────────┬─────────────────┐
+│ Load Balancer 1 │ Load Balancer 2 │
+│ 192.168.1.5     │ 192.168.1.6     │
+│ HAProxy + Keep  │ HAProxy + Keep  │
+│ alived (MASTER) │ alived (BACKUP) │
+└─────────┬───────┴─────────┬───────┘
+          │                 │
+          └─────────────────┘
+                  ↓
+     ┌─────────┬─────────┬─────────┐
+     │ App 1   │ App 2   │ App 3   │
+     │ 192.168 │ 192.168 │ 192.168 │
+     │ .1.10   │ .1.20   │ .1.21   │
+     │ GitLab +│ GitLab +│ GitLab +│
+     │ Redis M │ Redis S │ Redis S │
+     └────┬────┴────┬────┴────┬────┘
+          │         │         │
+          └─────────┼─────────┘
+                    ↓
+          ┌─────────┴─────────┐
+          │   Database HA    │
+          │ PostgreSQL 18.1  │
+          │ Primary: 192.168.1.30 │
+          │ Replica: 192.168.1.31 │
+          └───────────────────┘
+
+     ┌─────────┬─────────┬─────────┐
+     │ Runner  │ Runner  │ Runner  │
+     │ 192.168 │ 192.168 │ 192.168 │
+     │ .1.90   │ .1.91   │ .1.92   │
+     │ GitLab  │ GitLab  │ GitLab  │
+     │ Runner +│ Runner +│ Runner +│
+     │ MinIO   │ MinIO   │ MinIO   │
+     └─────────┴─────────┴─────────┘
+
+          ┌───────────────────┐
+          │   NFS Server      │
+          │   192.168.1.50    │
+          │ Shared Storage    │
+          │ /srv/gitlab/*     │
+          └───────────────────┘
+```
+
+### Component Details:
+- **🔴 Load Balancers**: HAProxy with Keepalived for VIP failover
+- **🟠 Application Servers**: GitLab CE with Redis (Master/Slave)
+- **🔵 Database**: PostgreSQL with streaming replication
+- **🟢 CI/CD Runners**: GitLab Runner + MinIO object storage
+- **🟣 Shared Storage**: NFS for Git repositories and builds
+
+## 🚀 Quick Start
+
+### Prerequisites
+- **Ubuntu 22.04+ servers** with SSH access
+- **Docker & Docker Compose** pre-installed on all servers
+- **Ansible 2.9+** on control machine
+- **8+ CPU cores, 16GB+ RAM, 100GB+ storage** per server
+
+### Infrastructure Requirements
+| Component | Servers | CPU | RAM | Storage | Purpose |
+|-----------|---------|-----|-----|---------|---------|
+| Load Balancers | 2 | 2 cores | 4GB | 50GB | HAProxy + Keepalived |
+| Application Servers | 3 | 8 cores | 32GB | 200GB | GitLab + Redis |
+| Database Servers | 2 | 4 cores | 16GB | 500GB | PostgreSQL HA |
+| Runner Servers | 3 | 4 cores | 8GB | 200GB | CI/CD + MinIO |
+| NFS Server | 1 | 2 cores | 4GB | 1TB | Shared Storage |
+
+### Deployment Steps
+
+1. **Clone and configure:**
+   ```bash
+   git clone <repository>
+   cd gitlab-ha
+   # Edit hosts file with your server IPs
+   # Update passwords in hosts file
+   ```
+
+2. **Deploy infrastructure:**
+   ```bash
+   chmod +x start_script.sh
+   ./start_script.sh
+   ```
+
+3. **Access GitLab:**
+   - **URL:** `http://192.168.1.100`
+   - **HAProxy Stats:** `http://192.168.1.100:8404/stats`
+   - **MinIO Console:** `http://192.168.1.100:9001`
+
+## 📋 Components
+
+### Load Balancers (HAProxy + Keepalived)
+- **Virtual IP:** 192.168.1.100
+- **High availability** with automatic failover
+- **SSL termination** ready
+- **Rate limiting** and security headers
+
+### Application Servers (GitLab CE)
+- **Version:** 18.7.0-ce.0
+- **Multi-server deployment** with shared storage
+- **Container Registry** enabled
+- **Pages** support
+- **Monitoring** with Prometheus
+
+### Database (PostgreSQL HA)
+- **Version:** 18.1-alpine
+- **Streaming replication** (Primary + Replica)
+- **SSL encryption** enabled
+- **Optimized for GitLab** workloads
+- **Automatic failover** ready
+
+### Cache (Redis Cluster)
+- **Version:** 7.4.7-alpine
+- **Master-slave replication**
+- **Persistence** enabled
+- **Security** with authentication
+
+### Object Storage (MinIO)
+- **Version:** RELEASE.2025-01-15T09-52-05Z
+- **Distributed cluster** on runner servers
+- **S3-compatible** API
+- **GitLab integration** for artifacts/uploads
+- **CI/CD cache** storage
+
+### CI/CD Runners
+- **Version:** 18.7.0
+- **Docker executor** with DinD
+- **MinIO cache** for build artifacts
+- **Auto-scaling** ready
+
+### Shared Storage (NFS)
+- **High-performance** NFS server
+- **Git repositories** and build artifacts
+- **Redundant** storage design
+
+## 🔧 Configuration Files
+
+| File | Purpose | Target Servers |
+|------|---------|----------------|
+| `hosts` | Ansible inventory | All servers |
+| `load-balancer.yaml` | HAProxy + Keepalived | lb1, lb2 |
+| `databases.yaml` | PostgreSQL HA | db1, db2 |
+| `redis-cluster.yaml` | Redis replication | app1, app2, app3 |
+| `minio-cluster.yaml` | MinIO distributed | runner1, runner2, runner3 |
+| `gitlab.yaml` | GitLab application | app1, app2, app3 |
+| `gitlab-runner.yaml` | CI/CD runners | runner1, runner2, runner3 |
+| `nfs-server.yaml` | Shared storage | nfs1 |
+| `start_script.sh` | Automated deployment | Control machine |
+
+## 🔒 Security Features
+
+- **SSL/TLS encryption** for database and web traffic
+- **Firewall configuration** (UFW)
+- **Secure defaults** with authentication
+- **Network isolation** between components
+- **Regular security updates** via Docker
+
+## 📊 Monitoring & Health Checks
+
+- **HAProxy statistics** at `:8404/stats`
+- **GitLab health checks** built-in
+- **Database replication** monitoring
+- **MinIO cluster** status
+- **Container health checks** for all services
+
+## 🔄 Backup & Recovery
+
+- **Database backups** configured
+- **GitLab backup** integration
+- **NFS shared storage** for consistency
+- **MinIO data** persistence
+- **Automated backup** scripts ready
+
+## 🛠️ Maintenance
+
+### Scaling
+- Add more application servers to `[gitlab_apps]`
+- Expand MinIO cluster by adding runner servers
+- Scale database read replicas
+
+### Updates
+- Update versions in `hosts` file
+- Run playbooks individually for rolling updates
+- Test updates in staging environment first
+
+### Troubleshooting
+- Check HAProxy stats for load distribution
+- Verify NFS mounts on application servers
+- Monitor Docker container logs
+- Use Ansible ad-hoc commands for diagnostics
+
+## 📝 Manual Steps Required
+
+After deployment:
+1. **Register GitLab Runners** with tokens from GitLab admin
+2. **Configure SSL certificates** for production
+3. **Set up backup schedules**
+4. **Configure monitoring/alerting**
+5. **Change default passwords** in `hosts` file
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Test changes thoroughly
+4. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+---
+
+**Note:** This setup is designed for production use. Always test in a staging environment before deploying to production.

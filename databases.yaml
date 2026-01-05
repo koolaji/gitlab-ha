@@ -3,6 +3,8 @@
   hosts: database
   become: yes
   gather_facts: yes
+  vars:
+    project_dir: "/opt/gitlab-ha/database"
   
   tasks:
     - name: Install system packages
@@ -17,27 +19,11 @@
         state: present
         update_cache: yes
 
-    - name: Install Docker
-      shell: |
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sh get-docker.sh
-        rm get-docker.sh
-        systemctl enable docker
-        systemctl start docker
-      args:
-        creates: /usr/bin/docker
-
     - name: Add user to docker group
       user:
         name: "{{ ansible_user }}"
         groups: docker
         append: yes
-
-    - name: Install Docker Compose
-      get_url:
-        url: "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
-        dest: /usr/local/bin/docker-compose
-        mode: '0755'
 
     - name: Create project directory
       file:
@@ -50,24 +36,25 @@
     - name: Create PostgreSQL configuration
       copy:
         content: |
-          # PostgreSQL 18.1 HA Configuration
+          # PostgreSQL 18.1 HA Configuration for GitLab
           listen_addresses = '*'
           port = 5432
           max_connections = 300
-          shared_buffers = 1GB
-          effective_cache_size = 4GB
-          maintenance_work_mem = 256MB
+          shared_buffers = 4GB
+          effective_cache_size = 12GB
+          maintenance_work_mem = 1GB
           checkpoint_completion_target = 0.9
           wal_buffers = 64MB
           default_statistics_target = 100
           random_page_cost = 1.1
           effective_io_concurrency = 200
-          work_mem = 16MB
+          work_mem = 32MB
           
           # Replication settings
           wal_level = replica
           max_wal_senders = 10
           max_replication_slots = 10
+          wal_keep_size = 1GB
           hot_standby = on
           hot_standby_feedback = on
           
@@ -77,6 +64,15 @@
           track_counts = on
           track_io_timing = on
           
+          # Autovacuum settings
+          autovacuum = on
+          autovacuum_max_workers = 6
+          autovacuum_naptime = 20s
+          autovacuum_vacuum_threshold = 50
+          autovacuum_analyze_threshold = 50
+          autovacuum_vacuum_scale_factor = 0.02
+          autovacuum_analyze_scale_factor = 0.01
+          
           # Logging
           log_destination = 'stderr'
           logging_collector = on
@@ -84,12 +80,22 @@
           log_checkpoints = on
           log_connections = on
           log_disconnections = on
+          log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
           
           # Security
           ssl = on
           ssl_cert_file = 'server.crt'
           ssl_key_file = 'server.key'
         dest: "{{ project_dir }}/postgresql.conf"
+
+    - name: Generate SSL certificates
+      shell: |
+        openssl req -new -x509 -days 365 -nodes -text -out server.crt -keyout server.key -subj "/CN={{ ansible_hostname }}"
+        chmod 600 server.key
+        chown 999:999 server.crt server.key
+      args:
+        chdir: "{{ project_dir }}"
+        creates: server.crt
 
     - name: Create PostgreSQL HBA configuration
       copy:
@@ -142,6 +148,8 @@
                 - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
                 - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
                 - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+                - ./server.crt:/var/lib/postgresql/server.crt:ro
+                - ./server.key:/var/lib/postgresql/server.key:ro
               ports:
                 - "5432:5432"
               command: >
@@ -170,7 +178,9 @@
                 PGUSER: postgres
                 POSTGRES_PASSWORD: {{ gitlab_db_password }}
               volumes:
-                - postgres-replica-data:/var/lib/postgresql/data
+                - postgres-replica-data:/var/lib/postgresql/da
+                - ./server.crt:/var/lib/postgresql/server.crt:ro
+                - ./server.key:/var/lib/postgresql/server.key:rota
                 - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
                 - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
               ports:

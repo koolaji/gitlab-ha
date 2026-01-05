@@ -3,6 +3,8 @@
   hosts: nfs
   become: yes
   gather_facts: yes
+  vars:
+    project_dir: "/opt/gitlab-ha/nfs"
   
   tasks:
     - name: Install NFS server packages

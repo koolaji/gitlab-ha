@@ -7,15 +7,14 @@ db1 ansible_host=192.168.1.30 ansible_user=ubuntu db_role=primary
 db2 ansible_host=192.168.1.31 ansible_user=ubuntu db_role=replica
 
 [redis]
-redis1 ansible_host=192.168.1.40 ansible_user=ubuntu redis_role=master
-redis2 ansible_host=192.168.1.41 ansible_user=ubuntu redis_role=slave
-redis3 ansible_host=192.168.1.42 ansible_user=ubuntu redis_role=slave
+app1 ansible_host=192.168.1.10 ansible_user=ubuntu redis_role=master
+app2 ansible_host=192.168.1.20 ansible_user=ubuntu redis_role=slave
+app3 ansible_host=192.168.1.21 ansible_user=ubuntu redis_role=slave
 
 [minio]
-minio1 ansible_host=192.168.1.60 ansible_user=ubuntu
-minio2 ansible_host=192.168.1.61 ansible_user=ubuntu
-minio3 ansible_host=192.168.1.62 ansible_user=ubuntu
-minio4 ansible_host=192.168.1.63 ansible_user=ubuntu
+runner1 ansible_host=192.168.1.90 ansible_user=ubuntu
+runner2 ansible_host=192.168.1.91 ansible_user=ubuntu
+runner3 ansible_host=192.168.1.92 ansible_user=ubuntu
 
 [nfs]
 nfs1 ansible_host=192.168.1.50 ansible_user=ubuntu
@@ -55,4 +54,3 @@ gitlab_runner_token="glrt-CHANGEME"
 
 # Network Configuration
 gitlab_vip="192.168.1.100"
-project_dir="/opt/gitlab-ha"

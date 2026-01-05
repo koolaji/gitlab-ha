@@ -8,8 +8,8 @@ set -e
 echo "🚀 Starting GitLab HA Production Deployment..."
 
 # Check if inventory file exists
-if [ ! -f "inventory.ini" ]; then
-    echo "❌ inventory.ini file not found!"
+if [ ! -f "hosts" ]; then
+    echo "❌ hosts file not found!"
     exit 1
 fi
 
@@ -27,31 +27,31 @@ ansible-galaxy collection install ansible.posix
 
 # Deploy in correct order
 echo "📋 Step 1: Deploying Load Balancers..."
-ansible-playbook -i inventory.ini load-balancer.yml
+ansible-playbook -i hosts load-balancer.yaml
 
 echo "🗄️  Step 2: Deploying Database Cluster..."
-ansible-playbook -i inventory.ini database.yml
+ansible-playbook -i hosts databases.yaml
 
 echo "🔴 Step 3: Deploying Redis Cluster..."
-ansible-playbook -i inventory.ini redis.yml
+ansible-playbook -i hosts redis-cluster.yaml
 
 echo "📦 Step 4: Deploying MinIO Cluster..."
-ansible-playbook -i inventory.ini minio.yml
+ansible-playbook -i hosts minio-cluster.yaml
 
 echo "📁 Step 5: Deploying NFS Server..."
-ansible-playbook -i inventory.ini nfs.yml
+ansible-playbook -i hosts nfs-server.yaml
 
 echo "🦊 Step 6: Deploying GitLab Applications..."
-ansible-playbook -i inventory.ini gitlab-apps.yml
+ansible-playbook -i hosts gitlab.yaml
 
 echo "🏃 Step 7: Deploying GitLab Runners..."
-ansible-playbook -i inventory.ini gitlab-runners.yml
+ansible-playbook -i hosts gitlab-runner.yaml
 
 echo "✅ GitLab HA Deployment Complete!"
 echo ""
-echo "🌐 Access GitLab at: http://$(grep gitlab_vip inventory.ini | cut -d'=' -f2 | tr -d '"')"
-echo "📊 HAProxy Stats: http://$(grep gitlab_vip inventory.ini | cut -d'=' -f2 | tr -d '"'):8404/stats"
-echo "🗄️  MinIO Console: http://$(grep gitlab_vip inventory.ini | cut -d'=' -f2 | tr -d '"'):9001"
+echo "🌐 Access GitLab at: http://$(grep gitlab_vip hosts | cut -d'=' -f2 | tr -d '"')"
+echo "📊 HAProxy Stats: http://$(grep gitlab_vip hosts | cut -d'=' -f2 | tr -d '"'):8404/stats"
+echo "🗄️  MinIO Console: http://$(grep gitlab_vip hosts | cut -d'=' -f2 | tr -d '"'):9001"
 echo ""
 echo "⚠️  MANUAL STEPS REQUIRED:"
 echo "1. Register GitLab Runners with tokens from GitLab admin panel"
@@ -64,7 +64,7 @@ echo "5. Change default passwords in inventory.ini"
 echo ""
 echo "🏥 Running health checks..."
 
-VIP=$(grep gitlab_vip inventory.ini | cut -d'=' -f2 | tr -d '"')
+VIP=$(grep gitlab_vip hosts | cut -d'=' -f2 | tr -d '"')
 
 echo "Checking GitLab..."
 if curl -f http://$VIP/users/sign_in > /dev/null 2>&1; then
