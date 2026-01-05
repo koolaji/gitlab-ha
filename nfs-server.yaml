@@ -1,0 +1,130 @@
+---
+- name: Deploy Production NFS Server
+  hosts: nfs
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Install NFS server packages
+      apt:
+        name:
+          - nfs-kernel-server
+          - nfs-common
+          - portmap
+          - rpcbind
+          - ufw
+          - htop
+          - net-tools
+          - vim
+        state: present
+        update_cache: yes
+
+    - name: Create GitLab shared directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: 998
+        group: 998
+        mode: '0755'
+      loop:
+        - /srv/gitlab/shared
+        - /srv/gitlab/shared/artifacts
+        - /srv/gitlab/shared/lfs-objects
+        - /srv/gitlab/shared/uploads
+        - /srv/gitlab/shared/registry
+        - /srv/gitlab/shared/pages
+        - /srv/gitlab/shared/tmp
+        - /srv/gitlab/builds
+        - /srv/gitlab/shared/cache
+
+    - name: Configure NFS exports
+      copy:
+        content: |
+          # GitLab NFS exports
+          /srv/gitlab/shared 192.168.1.0/24(rw,sync,no_root_squash,no_subtree_check,anonuid=998,anongid=998)
+          /srv/gitlab/builds 192.168.1.0/24(rw,sync,no_root_squash,no_subtree_check,anonuid=998,anongid=998)
+        dest: /etc/exports
+
+    - name: Configure NFS server
+      copy:
+        content: |
+          # Number of servers to start up
+          RPCNFSDCOUNT=16
+          
+          # Runtime priority of server (see nice(1))
+          RPCNFSDPRIORITY=0
+          
+          # Options for rpc.mountd
+          RPCMOUNTDOPTS="--manage-gids"
+          
+          # Do you want to start the svcgssd daemon? It is only required for Kerberos
+          NEED_SVCGSSD="no"
+          
+          # Options for rpc.svcgssd
+          RPCSVCGSSDOPTS=""
+        dest: /etc/default/nfs-kernel-server
+
+    - name: Configure RPC bind
+      copy:
+        content: |
+          # Options for rpcbind
+          OPTIONS="-w"
+        dest: /etc/default/rpcbind
+
+    - name: Set NFS performance tuning
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { key: 'net.core.rmem_default', value: '262144' }
+        - { key: 'net.core.rmem_max', value: '16777216' }
+        - { key: 'net.core.wmem_default', value: '262144' }
+        - { key: 'net.core.wmem_max', value: '16777216' }
+        - { key: 'net.ipv4.tcp_rmem', value: '4096 65536 16777216' }
+        - { key: 'net.ipv4.tcp_wmem', value: '4096 65536 16777216' }
+
+    - name: Configure firewall for NFS
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - 111
+        - 2049
+        - 32765
+        - 32766
+        - 32767
+
+    - name: Configure firewall for NFS UDP
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: udp
+      loop:
+        - 111
+        - 2049
+        - 32765
+        - 32766
+        - 32767
+
+    - name: Start and enable NFS services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - rpcbind
+        - nfs-kernel-server
+
+    - name: Export NFS shares
+      command: exportfs -ra
+
+    - name: Verify NFS exports
+      command: showmount -e localhost
+      register: nfs_exports
+
+    - name: Display NFS exports
+      debug:
+        var: nfs_exports.stdout_lines

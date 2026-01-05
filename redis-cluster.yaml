@@ -1,0 +1,176 @@
+---
+- name: Deploy Production Redis Cluster
+  hosts: redis
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Install system packages
+      apt:
+        name:
+          - curl
+          - wget
+          - ufw
+          - htop
+          - net-tools
+          - vim
+        state: present
+        update_cache: yes
+
+    - name: Install Docker
+      shell: |
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+        rm get-docker.sh
+        systemctl enable docker
+        systemctl start docker
+      args:
+        creates: /usr/bin/docker
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Install Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Create project directory
+      file:
+        path: "{{ project_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Create Redis configuration
+      copy:
+        content: |
+          # Redis 7.4.7 Production Configuration
+          bind 0.0.0.0
+          port 6379
+          protected-mode yes
+          requireauth {{ redis_password }}
+          
+          # Memory settings
+          maxmemory 2gb
+          maxmemory-policy allkeys-lru
+          
+          # Persistence
+          save 900 1
+          save 300 10
+          save 60 10000
+          rdbcompression yes
+          rdbchecksum yes
+          dbfilename dump.rdb
+          dir /data
+          
+          # AOF
+          appendonly yes
+          appendfilename "appendonly.aof"
+          appendfsync everysec
+          no-appendfsync-on-rewrite no
+          auto-aof-rewrite-percentage 100
+          auto-aof-rewrite-min-size 64mb
+          
+          # Replication
+          {% if redis_role == 'slave' %}
+          replicaof {{ hostvars[groups['redis'][0]]['ansible_default_ipv4']['address'] }} 6379
+          masterauth {{ redis_password }}
+          {% endif %}
+          
+          # Performance
+          tcp-keepalive 300
+          tcp-backlog 511
+          timeout 0
+          databases 16
+          
+          # Security
+          rename-command FLUSHDB ""
+          rename-command FLUSHALL ""
+          rename-command DEBUG ""
+          rename-command CONFIG "CONFIG_b835c3f4d3c1"
+          
+          # Logging
+          loglevel notice
+          logfile /var/log/redis/redis-server.log
+          syslog-enabled yes
+          syslog-ident redis
+          
+          # Slow log
+          slowlog-log-slower-than 10000
+          slowlog-max-len 128
+          
+          # Client output buffer limits
+          client-output-buffer-limit normal 0 0 0
+          client-output-buffer-limit replica 256mb 64mb 60
+          client-output-buffer-limit pubsub 32mb 8mb 60
+        dest: "{{ project_dir }}/redis.conf"
+
+    - name: Create Redis Docker Compose
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            redis:
+              image: redis:{{ redis_version }}
+              container_name: redis-{{ redis_role }}
+              restart: always
+              command: redis-server /usr/local/etc/redis/redis.conf
+              volumes:
+                - redis-data:/data
+                - redis-logs:/var/log/redis
+                - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+              ports:
+                - "6379:6379"
+              networks:
+                - redis_network
+              healthcheck:
+                test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+              deploy:
+                resources:
+                  limits:
+                    memory: 3G
+                  reservations:
+                    memory: 1G
+              sysctls:
+                net.core.somaxconn: 1024
+              ulimits:
+                memlock:
+                  soft: -1
+                  hard: -1
+
+          volumes:
+            redis-data:
+            redis-logs:
+
+          networks:
+            redis_network:
+              driver: bridge
+        dest: "{{ project_dir }}/docker-compose.yml"
+
+    - name: Configure firewall
+      ufw:
+        rule: allow
+        port: "6379"
+        proto: tcp
+
+    - name: Start Redis services
+      community.docker.docker_compose:
+        project_src: "{{ project_dir }}"
+        state: present
+      become_user: "{{ ansible_user }}"
+
+    - name: Wait for Redis to be ready
+      wait_for:
+        port: 6379
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 10
+        timeout: 60

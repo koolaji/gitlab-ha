@@ -1,0 +1,229 @@
+---
+- name: Deploy Production PostgreSQL HA Database
+  hosts: database
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Install system packages
+      apt:
+        name:
+          - curl
+          - wget
+          - ufw
+          - htop
+          - net-tools
+          - vim
+        state: present
+        update_cache: yes
+
+    - name: Install Docker
+      shell: |
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+        rm get-docker.sh
+        systemctl enable docker
+        systemctl start docker
+      args:
+        creates: /usr/bin/docker
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Install Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Create project directory
+      file:
+        path: "{{ project_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Create PostgreSQL configuration
+      copy:
+        content: |
+          # PostgreSQL 18.1 HA Configuration
+          listen_addresses = '*'
+          port = 5432
+          max_connections = 300
+          shared_buffers = 1GB
+          effective_cache_size = 4GB
+          maintenance_work_mem = 256MB
+          checkpoint_completion_target = 0.9
+          wal_buffers = 64MB
+          default_statistics_target = 100
+          random_page_cost = 1.1
+          effective_io_concurrency = 200
+          work_mem = 16MB
+          
+          # Replication settings
+          wal_level = replica
+          max_wal_senders = 10
+          max_replication_slots = 10
+          hot_standby = on
+          hot_standby_feedback = on
+          
+          # Performance tuning for GitLab
+          shared_preload_libraries = 'pg_stat_statements'
+          track_activities = on
+          track_counts = on
+          track_io_timing = on
+          
+          # Logging
+          log_destination = 'stderr'
+          logging_collector = on
+          log_min_duration_statement = 1000
+          log_checkpoints = on
+          log_connections = on
+          log_disconnections = on
+          
+          # Security
+          ssl = on
+          ssl_cert_file = 'server.crt'
+          ssl_key_file = 'server.key'
+        dest: "{{ project_dir }}/postgresql.conf"
+
+    - name: Create PostgreSQL HBA configuration
+      copy:
+        content: |
+          # TYPE  DATABASE        USER            ADDRESS                 METHOD
+          local   all             all                                     trust
+          host    all             all             127.0.0.1/32            md5
+          host    all             all             ::1/128                 md5
+          host    gitlabhq_production gitlab      192.168.1.0/24          md5
+          host    replication     replicator      192.168.1.0/24          md5
+          host    all             postgres        192.168.1.0/24          md5
+        dest: "{{ project_dir }}/pg_hba.conf"
+
+    - name: Create database initialization script
+      copy:
+        content: |
+          -- Create GitLab database extensions
+          CREATE EXTENSION IF NOT EXISTS pg_trgm;
+          CREATE EXTENSION IF NOT EXISTS btree_gist;
+          CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+          
+          -- Create replication user
+          CREATE USER replicator REPLICATION LOGIN CONNECTION LIMIT 10 ENCRYPTED PASSWORD '{{ gitlab_db_password }}';
+          
+          -- Optimize for GitLab
+          ALTER DATABASE gitlabhq_production SET log_min_duration_statement = 1000;
+          ALTER DATABASE gitlabhq_production SET shared_preload_libraries = 'pg_stat_statements';
+          
+          -- Create GitLab specific settings
+          ALTER SYSTEM SET max_locks_per_transaction = 128;
+          ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';
+        dest: "{{ project_dir }}/init-db.sql"
+
+    - name: Create Database Docker Compose
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            postgres-primary:
+              image: postgres:{{ postgres_version }}
+              container_name: postgres-primary
+              restart: always
+              environment:
+                POSTGRES_DB: gitlabhq_production
+                POSTGRES_USER: gitlab
+                POSTGRES_PASSWORD: {{ gitlab_db_password }}
+                POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+              volumes:
+                - postgres-primary-data:/var/lib/postgresql/data
+                - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+                - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+                - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+              ports:
+                - "5432:5432"
+              command: >
+                postgres
+                -c config_file=/etc/postgresql/postgresql.conf
+                -c hba_file=/etc/postgresql/pg_hba.conf
+              networks:
+                - db_network
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U gitlab -d gitlabhq_production"]
+                interval: 10s
+                timeout: 5s
+                retries: 5
+              deploy:
+                resources:
+                  limits:
+                    memory: 4G
+                  reservations:
+                    memory: 2G
+
+            postgres-replica:
+              image: postgres:{{ postgres_version }}
+              container_name: postgres-replica
+              restart: always
+              environment:
+                PGUSER: postgres
+                POSTGRES_PASSWORD: {{ gitlab_db_password }}
+              volumes:
+                - postgres-replica-data:/var/lib/postgresql/data
+                - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+                - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+              ports:
+                - "5433:5432"
+              networks:
+                - db_network
+              depends_on:
+                postgres-primary:
+                  condition: service_healthy
+              command: >
+                bash -c "
+                if [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then
+                  PGPASSWORD={{ gitlab_db_password }} pg_basebackup -h postgres-primary -D /var/lib/postgresql/data -U postgres -v -P -W
+                  echo 'standby_mode = on' > /var/lib/postgresql/data/recovery.conf
+                  echo 'primary_conninfo = \"host=postgres-primary port=5432 user=postgres\"' >> /var/lib/postgresql/data/recovery.conf
+                  echo 'standby.signal' > /var/lib/postgresql/data/standby.signal
+                fi
+                postgres -c config_file=/etc/postgresql/postgresql.conf -c hba_file=/etc/postgresql/pg_hba.conf
+                "
+              deploy:
+                resources:
+                  limits:
+                    memory: 4G
+                  reservations:
+                    memory: 2G
+
+          volumes:
+            postgres-primary-data:
+            postgres-replica-data:
+
+          networks:
+            db_network:
+              driver: bridge
+        dest: "{{ project_dir }}/docker-compose.yml"
+
+    - name: Configure firewall
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - 5432
+        - 5433
+
+    - name: Start Database services
+      community.docker.docker_compose:
+        project_src: "{{ project_dir }}"
+        state: present
+      become_user: "{{ ansible_user }}"
+
+    - name: Wait for primary database
+      wait_for:
+        port: 5432
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 30
+        timeout: 120

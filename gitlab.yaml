@@ -1,0 +1,252 @@
+---
+- name: Deploy Production GitLab Applications
+  hosts: gitlab_apps
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Install system packages
+      apt:
+        name:
+          - curl
+          - wget
+          - ufw
+          - htop
+          - net-tools
+          - vim
+          - nfs-common
+        state: present
+        update_cache: yes
+
+    - name: Install Docker
+      shell: |
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+        rm get-docker.sh
+        systemctl enable docker
+        systemctl start docker
+      args:
+        creates: /usr/bin/docker
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Install Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Create project directory
+      file:
+        path: "{{ project_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Create GitLab directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: 998
+        group: 998
+        mode: '0755'
+      loop:
+        - "{{ project_dir }}/config"
+        - "{{ project_dir }}/logs"
+        - "{{ project_dir }}/data"
+        - "/srv/gitlab/shared"
+        - "/srv/gitlab/builds"
+
+    - name: Mount NFS shared storage
+      mount:
+        path: /srv/gitlab/shared
+        src: "{{ hostvars[groups['nfs'][0]]['ansible_default_ipv4']['address'] }}:/srv/gitlab/shared"
+        fstype: nfs
+        opts: rw,sync,hard,intr,rsize=1048576,wsize=1048576,timeo=14
+        state: mounted
+
+    - name: Mount NFS builds storage
+      mount:
+        path: /srv/gitlab/builds
+        src: "{{ hostvars[groups['nfs'][0]]['ansible_default_ipv4']['address'] }}:/srv/gitlab/builds"
+        fstype: nfs
+        opts: rw,sync,hard,intr,rsize=1048576,wsize=1048576,timeo=14
+        state: mounted
+
+    - name: Create GitLab configuration
+      copy:
+        content: |
+          external_url 'http://{{ gitlab_vip }}'
+          
+          # Disable built-in services
+          postgresql['enable'] = false
+          redis['enable'] = false
+          nginx['enable'] = true
+          
+          # Database settings
+          gitlab_rails['db_adapter'] = 'postgresql'
+          gitlab_rails['db_encoding'] = 'unicode'
+          gitlab_rails['db_host'] = '{{ hostvars[groups["database"][0]]["ansible_default_ipv4"]["address"] }}'
+          gitlab_rails['db_port'] = 5432
+          gitlab_rails['db_database'] = 'gitlabhq_production'
+          gitlab_rails['db_username'] = 'gitlab'
+          gitlab_rails['db_password'] = '{{ gitlab_db_password }}'
+          gitlab_rails['db_pool'] = 20
+          gitlab_rails['db_connect_timeout'] = 60
+          gitlab_rails['db_reconnect'] = true
+          
+          # Redis settings
+          gitlab_rails['redis_host'] = '{{ hostvars[groups["redis"][0]]["ansible_default_ipv4"]["address"] }}'
+          gitlab_rails['redis_port'] = 6379
+          gitlab_rails['redis_password'] = '{{ redis_password }}'
+          gitlab_rails['redis_database'] = 0
+          
+          # Object storage (MinIO)
+          gitlab_rails['object_store']['enabled'] = true
+          gitlab_rails['object_store']['proxy_download'] = true
+          gitlab_rails['object_store']['connection'] = {
+            'provider' => 'AWS',
+            'region' => 'us-east-1',
+            'aws_access_key_id' => '{{ minio_access_key }}',
+            'aws_secret_access_key' => '{{ minio_secret_key }}',
+            'endpoint' => 'http://{{ gitlab_vip }}:9000',
+            'aws_signature_version' => 4,
+            'path_style' => true
+          }
+          
+          # Object storage buckets
+          gitlab_rails['object_store']['objects']['artifacts']['bucket'] = 'gitlab-artifacts'
+          gitlab_rails['object_store']['objects']['external_diffs']['bucket'] = 'gitlab-artifacts'
+          gitlab_rails['object_store']['objects']['lfs']['bucket'] = 'gitlab-lfs'
+          gitlab_rails['object_store']['objects']['uploads']['bucket'] = 'gitlab-uploads'
+          gitlab_rails['object_store']['objects']['packages']['bucket'] = 'gitlab-packages'
+          gitlab_rails['object_store']['objects']['dependency_proxy']['bucket'] = 'gitlab-packages'
+          gitlab_rails['object_store']['objects']['terraform_state']['bucket'] = 'gitlab-packages'
+          
+          # NFS shared storage
+          gitlab_rails['shared_path'] = '/srv/gitlab/shared'
+          gitlab_ci['builds_directory'] = '/srv/gitlab/builds'
+          
+          # GitLab Shell
+          gitlab_shell['auth_file'] = '/srv/gitlab/shared/.ssh/authorized_keys'
+          
+          # Performance settings
+          unicorn['worker_processes'] = 4
+          unicorn['worker_timeout'] = 60
+          sidekiq['max_concurrency'] = 25
+          
+          # Monitoring
+          prometheus_monitoring['enable'] = true
+          grafana['enable'] = false
+          
+          # Security
+          gitlab_rails['gitlab_shell_ssh_port'] = 22
+          nginx['listen_port'] = 80
+          nginx['listen_https'] = false
+          
+          # Email settings
+          gitlab_rails['smtp_enable'] = false
+          
+          # Backup settings
+          gitlab_rails['backup_keep_time'] = 604800
+          gitlab_rails['backup_path'] = '/srv/gitlab/shared/backups'
+          
+          # Container Registry (optional)
+          registry_external_url 'http://{{ gitlab_vip }}:5050'
+          gitlab_rails['registry_enabled'] = true
+          registry['enable'] = true
+          registry_nginx['enable'] = true
+          registry_nginx['listen_port'] = 5050
+          
+          # Pages (optional)
+          pages_external_url "http://pages.{{ gitlab_vip }}"
+          gitlab_pages['enable'] = true
+          pages_nginx['enable'] = true
+        dest: "{{ project_dir }}/gitlab.rb"
+
+    - name: Create GitLab Docker Compose
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            gitlab:
+              image: gitlab/gitlab-ce:{{ gitlab_version }}
+              container_name: gitlab-{{ inventory_hostname }}
+              restart: always
+              hostname: '{{ inventory_hostname }}.gitlab.local'
+              environment:
+                GITLAB_OMNIBUS_CONFIG: |
+                  from_file '/omnibus_config/gitlab.rb'
+              volumes:
+                - gitlab-config:/etc/gitlab
+                - gitlab-logs:/var/log/gitlab
+                - gitlab-data:/var/opt/gitlab
+                - ./gitlab.rb:/omnibus_config/gitlab.rb:ro
+                - /srv/gitlab/shared:/srv/gitlab/shared
+                - /srv/gitlab/builds:/srv/gitlab/builds
+              ports:
+                - "80:80"
+                - "443:443"
+                - "22:22"
+                - "5050:5050"
+              networks:
+                - gitlab_network
+              healthcheck:
+                test: ["CMD", "/opt/gitlab/bin/gitlab-healthcheck", "--fail"]
+                interval: 60s
+                timeout: 30s
+                retries: 5
+                start_period: 200s
+              deploy:
+                resources:
+                  limits:
+                    memory: 8G
+                  reservations:
+                    memory: 4G
+              shm_size: '256m'
+              ulimits:
+                sigpending: 62793
+                nproc: 131072
+                nofile:
+                  soft: 60000
+                  hard: 60000
+                core: 0
+
+          volumes:
+            gitlab-config:
+            gitlab-logs:
+            gitlab-data:
+
+          networks:
+            gitlab_network:
+              driver: bridge
+        dest: "{{ project_dir }}/docker-compose.yml"
+
+    - name: Configure firewall
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - 80
+        - 443
+        - 22
+        - 5050
+
+    - name: Start GitLab services
+      community.docker.docker_compose:
+        project_src: "{{ project_dir }}"
+        state: present
+      become_user: "{{ ansible_user }}"
+
+    - name: Wait for GitLab to be ready
+      wait_for:
+        port: 80
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 120
+        timeout: 600

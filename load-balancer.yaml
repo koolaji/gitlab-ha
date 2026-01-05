@@ -1,0 +1,292 @@
+---
+- name: Deploy Production HA Load Balancer
+  hosts: load_balancer
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Install system packages
+      apt:
+        name:
+          - curl
+          - wget
+          - ufw
+          - keepalived
+          - htop
+          - net-tools
+          - vim
+        state: present
+        update_cache: yes
+
+    - name: Install Docker
+      shell: |
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+        rm get-docker.sh
+        systemctl enable docker
+        systemctl start docker
+      args:
+        creates: /usr/bin/docker
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Install Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Create project directory
+      file:
+        path: "{{ project_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Configure system limits
+      pam_limits:
+        domain: '*'
+        limit_type: "{{ item.type }}"
+        limit_item: "{{ item.item }}"
+        value: "{{ item.value }}"
+      loop:
+        - { type: 'soft', item: 'nofile', value: '65536' }
+        - { type: 'hard', item: 'nofile', value: '65536' }
+
+    - name: Create Keepalived configuration
+      copy:
+        content: |
+          global_defs {
+              router_id LB_{{ ansible_hostname }}
+              enable_script_security
+              script_user root
+          }
+
+          vrrp_script chk_haproxy {
+              script "/usr/bin/docker ps | grep -q gitlab-haproxy"
+              interval 2
+              weight 2
+              fall 3
+              rise 2
+          }
+
+          vrrp_instance VI_1 {
+              state {% if inventory_hostname == groups['load_balancer'][0] %}MASTER{% else %}BACKUP{% endif %}
+              interface {{ ansible_default_ipv4.interface }}
+              virtual_router_id 51
+              priority {{ keepalived_priority }}
+              advert_int 1
+              authentication {
+                  auth_type PASS
+                  auth_pass {{ keepalived_password }}
+              }
+              virtual_ipaddress {
+                  {{ gitlab_vip }}/24 dev {{ ansible_default_ipv4.interface }}
+              }
+              track_script {
+                  chk_haproxy
+              }
+          }
+        dest: /etc/keepalived/keepalived.conf
+
+    - name: Create HAProxy configuration
+      copy:
+        content: |
+          global
+              daemon
+              log stdout format raw local0 info
+              chroot /var/lib/haproxy
+              stats socket /run/haproxy/admin.sock mode 660 level admin
+              stats timeout 30s
+              user haproxy
+              group haproxy
+              maxconn 40000
+              nbthread 4
+
+          defaults
+              mode http
+              log global
+              option httplog
+              option dontlognull
+              option log-health-checks
+              option forwardfor except 127.0.0.0/8
+              option redispatch
+              option http-server-close
+              timeout connect 10s
+              timeout client 60s
+              timeout server 60s
+              timeout http-request 15s
+              timeout http-keep-alive 2s
+              timeout check 10s
+              retries 3
+              maxconn 8000
+
+          # HAProxy Statistics
+          frontend stats
+              bind *:8404
+              stats enable
+              stats uri /stats
+              stats refresh 30s
+              stats admin if { src 192.168.1.0/24 }
+              stats auth admin:{{ haproxy_stats_password }}
+              monitor-uri /health
+
+          # GitLab HTTP Frontend
+          frontend gitlab_http_frontend
+              bind *:80
+              bind *:443
+              
+              # Security headers
+              http-response set-header X-Frame-Options DENY
+              http-response set-header X-Content-Type-Options nosniff
+              http-response set-header X-XSS-Protection "1; mode=block"
+              
+              # Rate limiting
+              stick-table type ip size 100k expire 30s store http_req_rate(10s)
+              http-request track-sc0 src
+              http-request deny if { sc_http_req_rate(0) gt 50 }
+              
+              monitor-uri /haproxy-health
+              default_backend gitlab_web_backend
+
+          # GitLab Web Backend
+          backend gitlab_web_backend
+              balance roundrobin
+              option httpchk GET /users/sign_in
+              http-check expect status 200
+              default-server check inter 10s rise 3 fall 3 weight 100
+              
+              {% for host in groups['gitlab_apps'] %}
+              server {{ host }} {{ hostvars[host]['ansible_default_ipv4']['address'] }}:80 check maxconn 1000
+              {% endfor %}
+              
+              # Session persistence
+              stick-table type string len 32 size 30k expire 30m
+              stick on cookie(gitlab_session)
+
+          # GitLab SSH Frontend
+          frontend gitlab_ssh_frontend
+              bind *:22
+              mode tcp
+              option tcplog
+              maxconn 10000
+              default_backend gitlab_ssh_backend
+
+          # GitLab SSH Backend
+          backend gitlab_ssh_backend
+              mode tcp
+              balance leastconn
+              option tcp-check
+              tcp-check connect port 22
+              timeout server 300s
+              timeout connect 5s
+              
+              {% for host in groups['gitlab_apps'] %}
+              server {{ host }} {{ hostvars[host]['ansible_default_ipv4']['address'] }}:22 check inter 10s rise 2 fall 3
+              {% endfor %}
+
+          # MinIO Cluster Frontend
+          frontend minio_frontend
+              bind *:9000
+              option httplog
+              monitor-uri /minio/health/live
+              default_backend minio_backend
+
+          # MinIO Cluster Backend
+          backend minio_backend
+              balance roundrobin
+              option httpchk GET /minio/health/live
+              http-check expect status 200
+              
+              {% for host in groups['minio'] %}
+              server {{ host }} {{ hostvars[host]['ansible_default_ipv4']['address'] }}:9000 check inter 10s rise 3 fall 3
+              {% endfor %}
+
+          # MinIO Console Frontend
+          frontend minio_console_frontend
+              bind *:9001
+              default_backend minio_console_backend
+
+          # MinIO Console Backend
+          backend minio_console_backend
+              balance roundrobin
+              {% for host in groups['minio'] %}
+              server {{ host }} {{ hostvars[host]['ansible_default_ipv4']['address'] }}:9001 check inter 10s rise 3 fall 3
+              {% endfor %}
+        dest: "{{ project_dir }}/haproxy.cfg"
+
+    - name: Create Load Balancer Docker Compose
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            haproxy:
+              image: haproxy:{{ haproxy_version }}
+              container_name: gitlab-haproxy
+              restart: always
+              ports:
+                - "80:80"
+                - "443:443"
+                - "22:22"
+                - "8404:8404"
+                - "9000:9000"
+                - "9001:9001"
+              volumes:
+                - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+                - haproxy-socket:/run/haproxy
+              networks:
+                - lb_network
+              healthcheck:
+                test: ["CMD", "haproxy", "-f", "/usr/local/etc/haproxy/haproxy.cfg", "-c"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+              ulimits:
+                nofile:
+                  soft: 65536
+                  hard: 65536
+
+          volumes:
+            haproxy-socket:
+
+          networks:
+            lb_network:
+              driver: bridge
+        dest: "{{ project_dir }}/docker-compose.yml"
+
+    - name: Configure firewall
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - 80
+        - 443
+        - 22
+        - 8404
+        - 9000
+        - 9001
+
+    - name: Start Keepalived
+      systemd:
+        name: keepalived
+        state: started
+        enabled: yes
+
+    - name: Start Load Balancer
+      community.docker.docker_compose:
+        project_src: "{{ project_dir }}"
+        state: present
+      become_user: "{{ ansible_user }}"
+
+    - name: Wait for HAProxy to be ready
+      wait_for:
+        port: 8404
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 10
+        timeout: 60

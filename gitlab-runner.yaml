@@ -1,0 +1,193 @@
+---
+- name: Deploy Production GitLab Runners
+  hosts: runners
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Install system packages
+      apt:
+        name:
+          - curl
+          - wget
+          - ufw
+          - htop
+          - net-tools
+          - vim
+          - git
+        state: present
+        update_cache: yes
+
+    - name: Install Docker
+      shell: |
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+        rm get-docker.sh
+        systemctl enable docker
+        systemctl start docker
+      args:
+        creates: /usr/bin/docker
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Install Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Create project directory
+      file:
+        path: "{{ project_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Create GitLab Runner configuration
+      copy:
+        content: |
+          concurrent = 10
+          check_interval = 0
+          shutdown_timeout = 0
+          
+          [session_server]
+            session_timeout = 1800
+          
+          [[runners]]
+            name = "{{ inventory_hostname }}-docker-runner"
+            url = "http://{{ gitlab_vip }}"
+            token = "{{ gitlab_runner_token }}"
+            executor = "docker"
+            [runners.custom_build_dir]
+            [runners.cache]
+              Type = "s3"
+              Shared = true
+              [runners.cache.s3]
+                ServerAddress = "{{ gitlab_vip }}:9000"
+                AccessKey = "{{ minio_access_key }}"
+                SecretKey = "{{ minio_secret_key }}"
+                BucketName = "gitlab-runner-cache"
+                Insecure = true
+            [runners.docker]
+              tls_verify = false
+              image = "alpine:latest"
+              privileged = true
+              disable_entrypoint_overwrite = false
+              oom_kill_disable = false
+              disable_cache = false
+              volumes = ["/cache", "/var/run/docker.sock:/var/run/docker.sock"]
+              shm_size = 0
+              network_mode = "bridge"
+              pull_policy = ["if-not-present"]
+        dest: "{{ project_dir }}/config.toml"
+
+    - name: Create GitLab Runner Docker Compose
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            gitlab-runner:
+              image: gitlab/gitlab-runner:{{ gitlab_runner_version }}
+              container_name: gitlab-runner-{{ inventory_hostname }}
+              restart: always
+              volumes:
+                - ./config.toml:/etc/gitlab-runner/config.toml:ro
+                - /var/run/docker.sock:/var/run/docker.sock
+                - gitlab-runner-cache:/cache
+              networks:
+                - runner_network
+              environment:
+                - DOCKER_TLS_CERTDIR=""
+              deploy:
+                resources:
+                  limits:
+                    memory: 4G
+                  reservations:
+                    memory: 1G
+              healthcheck:
+                test: ["CMD", "gitlab-runner", "verify"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+
+            # DinD service for Docker-in-Docker builds
+            docker-dind:
+              image: docker:24.0-dind
+              container_name: docker-dind-{{ inventory_hostname }}
+              restart: always
+              privileged: true
+              environment:
+                - DOCKER_TLS_CERTDIR=""
+                - DOCKER_DRIVER=overlay2
+              volumes:
+                - docker-dind-data:/var/lib/docker
+                - docker-dind-certs:/certs
+              networks:
+                - runner_network
+              command: ["dockerd", "--host=tcp://0.0.0.0:2376", "--tls=false"]
+
+          volumes:
+            gitlab-runner-cache:
+            docker-dind-data:
+            docker-dind-certs:
+
+          networks:
+            runner_network:
+              driver: bridge
+        dest: "{{ project_dir }}/docker-compose.yml"
+
+    - name: Configure Docker daemon for runners
+      copy:
+        content: |
+          {
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "10m",
+              "max-file": "3"
+            },
+            "storage-driver": "overlay2",
+            "default-ulimits": {
+              "nofile": {
+                "hard": 64000,
+                "soft": 64000
+              }
+            }
+          }
+        dest: /etc/docker/daemon.json
+
+    - name: Restart Docker service
+      systemd:
+        name: docker
+        state: restarted
+
+    - name: Configure firewall
+      ufw:
+        rule: allow
+        port: "2376"
+        proto: tcp
+
+    - name: Start GitLab Runner services
+      community.docker.docker_compose:
+        project_src: "{{ project_dir }}"
+        state: present
+      become_user: "{{ ansible_user }}"
+
+    - name: Wait for GitLab Runner to be ready
+      wait_for:
+        timeout: 30
+
+    - name: Register GitLab Runner (manual step required)
+      debug:
+        msg: |
+          MANUAL STEP REQUIRED:
+          1. Get registration token from GitLab Admin Area > Runners
+          2. Run: docker exec -it gitlab-runner-{{ inventory_hostname }} gitlab-runner register
+          3. Use URL: http://{{ gitlab_vip }}
+          4. Use token from GitLab admin panel
+          5. Choose docker executor
+          6. Use default image: alpine:latest 

@@ -1,0 +1,142 @@
+---
+- name: Deploy Production MinIO Cluster
+  hosts: minio
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Install system packages
+      apt:
+        name:
+          - curl
+          - wget
+          - ufw
+          - htop
+          - net-tools
+          - vim
+        state: present
+        update_cache: yes
+
+    - name: Install Docker
+      shell: |
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+        rm get-docker.sh
+        systemctl enable docker
+        systemctl start docker
+      args:
+        creates: /usr/bin/docker
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Install Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Create project directory
+      file:
+        path: "{{ project_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Create MinIO data directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      loop:
+        - "{{ project_dir }}/data1"
+        - "{{ project_dir }}/data2"
+
+    - name: Create MinIO Docker Compose
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            minio:
+              image: minio/minio:{{ minio_version }}
+              container_name: minio-{{ inventory_hostname }}
+              restart: always
+              command: server --console-address ":9001" http://{% for host in groups['minio'] %}{{ hostvars[host]['ansible_default_ipv4']['address'] }}:9000/data1 http://{{ hostvars[host]['ansible_default_ipv4']['address'] }}:9000/data2{% if not loop.last %} {% endif %}{% endfor %}
+              environment:
+                MINIO_ROOT_USER: {{ minio_access_key }}
+                MINIO_ROOT_PASSWORD: {{ minio_secret_key }}
+                MINIO_PROMETHEUS_AUTH_TYPE: public
+                MINIO_PROMETHEUS_URL: http://prometheus:9090
+                MINIO_PROMETHEUS_JOB_ID: minio-job
+                MINIO_SERVER_URL: http://{{ gitlab_vip }}:9000
+                MINIO_BROWSER_REDIRECT_URL: http://{{ gitlab_vip }}:9001
+              volumes:
+                - ./data1:/data1
+                - ./data2:/data2
+              ports:
+                - "9000:9000"
+                - "9001:9001"
+              networks:
+                - minio_network
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+                interval: 30s
+                timeout: 20s
+                retries: 3
+              deploy:
+                resources:
+                  limits:
+                    memory: 2G
+                  reservations:
+                    memory: 1G
+              ulimits:
+                nofile:
+                  soft: 65536
+                  hard: 65536
+
+          networks:
+            minio_network:
+              driver: bridge
+        dest: "{{ project_dir }}/docker-compose.yml"
+
+    - name: Configure firewall
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - 9000
+        - 9001
+
+    - name: Start MinIO services
+      community.docker.docker_compose:
+        project_src: "{{ project_dir }}"
+        state: present
+      become_user: "{{ ansible_user }}"
+
+    - name: Wait for MinIO to be ready
+      wait_for:
+        port: 9000
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 15
+        timeout: 120
+
+    - name: Create GitLab bucket (run only on first node)
+      shell: |
+        docker run --rm --network host \
+          --entrypoint=/bin/sh minio/mc:latest \
+          -c "mc alias set myminio http://{{ ansible_default_ipv4.address }}:9000 {{ minio_access_key }} {{ minio_secret_key }} && \
+              mc mb myminio/gitlab-artifacts --ignore-existing && \
+              mc mb myminio/gitlab-lfs --ignore-existing && \
+              mc mb myminio/gitlab-uploads --ignore-existing && \
+              mc mb myminio/gitlab-packages --ignore-existing && \
+              mc mb myminio/gitlab-registry --ignore-existing && \
+              mc mb myminio/gitlab-backups --ignore-existing"
+      when: inventory_hostname == groups['minio'][0]
+      ignore_errors: yes

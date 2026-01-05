@@ -1,0 +1,58 @@
+[load_balancer]
+lb1 ansible_host=192.168.1.5 ansible_user=ubuntu keepalived_priority=110
+lb2 ansible_host=192.168.1.6 ansible_user=ubuntu keepalived_priority=100
+
+[database]
+db1 ansible_host=192.168.1.30 ansible_user=ubuntu db_role=primary
+db2 ansible_host=192.168.1.31 ansible_user=ubuntu db_role=replica
+
+[redis]
+redis1 ansible_host=192.168.1.40 ansible_user=ubuntu redis_role=master
+redis2 ansible_host=192.168.1.41 ansible_user=ubuntu redis_role=slave
+redis3 ansible_host=192.168.1.42 ansible_user=ubuntu redis_role=slave
+
+[minio]
+minio1 ansible_host=192.168.1.60 ansible_user=ubuntu
+minio2 ansible_host=192.168.1.61 ansible_user=ubuntu
+minio3 ansible_host=192.168.1.62 ansible_user=ubuntu
+minio4 ansible_host=192.168.1.63 ansible_user=ubuntu
+
+[nfs]
+nfs1 ansible_host=192.168.1.50 ansible_user=ubuntu
+
+[runners]
+runner1 ansible_host=192.168.1.90 ansible_user=ubuntu
+runner2 ansible_host=192.168.1.91 ansible_user=ubuntu
+runner3 ansible_host=192.168.1.92 ansible_user=ubuntu
+
+[gitlab_apps]
+app1 ansible_host=192.168.1.10 ansible_user=ubuntu
+app2 ansible_host=192.168.1.20 ansible_user=ubuntu
+app3 ansible_host=192.168.1.21 ansible_user=ubuntu
+
+[all:vars]
+ansible_ssh_private_key_file=~/.ssh/id_rsa
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+# REAL PRODUCTION STABLE VERSIONS (January 2026)
+gitlab_version="18.7.0-ce.0"
+postgres_version="18.1-alpine"
+redis_version="7.4.7-alpine"
+minio_version="RELEASE.2025-01-15T09-52-05Z"
+haproxy_version="2.9.12-alpine"
+gitlab_runner_version="18.7.0"
+nginx_version="1.26.2-alpine"
+
+# Passwords and Keys - CHANGE THESE IN PRODUCTION!
+gitlab_db_password="GitLab_DB_Pass_2026!"
+redis_password="Redis_Cluster_Pass_2026!"
+minio_access_key="gitlab-minio-access"
+minio_secret_key="GitLab_MinIO_Secret_2026!"
+keepalived_password="KeepAlived_Pass_2026!"
+haproxy_stats_password="HAProxy_Stats_2026!"
+gitlab_runner_token="glrt-CHANGEME"
+
+# Network Configuration
+gitlab_vip="192.168.1.100"
+project_dir="/opt/gitlab-ha"
