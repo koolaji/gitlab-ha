@@ -18,14 +18,14 @@ Virtual IP (192.168.1.100)
           │                 │
           └─────────────────┘
                   ↓
-     ┌─────────┬─────────┬─────────┐
-     │ App 1   │ App 2   │ App 3   │
-     │ 192.168 │ 192.168 │ 192.168 │
-     │ .1.10   │ .1.20   │ .1.21   │
-     │ GitLab +│ GitLab +│ GitLab +│
-     │ Redis M │ Redis S │ Redis S │
-     └────┬────┴────┬────┴────┬────┘
-          │         │         │
+     ┌─────────┬─────────┐
+     │ App 1   │ App 2   │
+     │ 192.168 │ 192.168 │
+     │ .1.10   │ .1.20   │
+     │ GitLab +│ GitLab +│
+     │ Redis M │ Redis S │
+     └────┬────┴────┬────┘
+          │         │
           └─────────┼─────────┘
                     ↓
           ┌─────────┴─────────┐
@@ -35,19 +35,18 @@ Virtual IP (192.168.1.100)
           │ Replica: 192.168.1.31 │
           └───────────────────┘
 
-     ┌─────────┬─────────┬─────────┐
-     │ Runner  │ Runner  │ Runner  │
-     │ 192.168 │ 192.168 │ 192.168 │
-     │ .1.90   │ .1.91   │ .1.92   │
-     │ GitLab  │ GitLab  │ GitLab  │
-     │ Runner +│ Runner +│ Runner +│
-     │ MinIO   │ MinIO   │ MinIO   │
-     └─────────┴─────────┴─────────┘
+     ┌─────────┬─────────┐
+     │ Runner  │ Runner  │
+     │ 192.168 │ 192.168 │
+     │ .1.90   │ .1.91   │
+     │ GitLab  │ GitLab  │
+     │ Runner +│ Runner +│
+     │ MinIO   │ MinIO   │
+     └─────────┴─────────┘
 
           ┌───────────────────┐
-          │   NFS Server      │
-          │   192.168.1.50    │
-          │ Shared Storage    │
+          │   Ceph Storage    │
+          │ Distributed FS    │
           │ /srv/gitlab/*     │
           └───────────────────┘
 ```
@@ -57,7 +56,7 @@ Virtual IP (192.168.1.100)
 - **🟠 Application Servers**: GitLab CE with Redis (Master/Slave)
 - **🔵 Database**: PostgreSQL with streaming replication
 - **🟢 CI/CD Runners**: GitLab Runner + MinIO object storage
-- **🟣 Shared Storage**: NFS for Git repositories and builds
+- **🟣 Shared Storage**: Ceph distributed filesystem
 
 ## 🚀 Quick Start
 
@@ -71,10 +70,9 @@ Virtual IP (192.168.1.100)
 | Component | Servers | CPU | RAM | Storage | Purpose |
 |-----------|---------|-----|-----|---------|---------|
 | Load Balancers | 2 | 2 cores | 4GB | 50GB | HAProxy + Keepalived |
-| Application Servers | 3 | 8 cores | 32GB | 200GB | GitLab + Redis |
+| Application Servers | 2 | 8 cores | 32GB | 200GB | GitLab + Redis |
 | Database Servers | 2 | 4 cores | 16GB | 500GB | PostgreSQL HA |
-| Runner Servers | 3 | 4 cores | 8GB | 200GB | CI/CD + MinIO |
-| NFS Server | 1 | 2 cores | 4GB | 1TB | Shared Storage |
+| Runner Servers | 2 | 4 cores | 8GB | 200GB | CI/CD + MinIO |
 
 ### Deployment Steps
 
@@ -139,10 +137,10 @@ Virtual IP (192.168.1.100)
 - **Auto-scaling** ready
 
 ### Shared Storage (NFS)
-- **High-performance** NFS server
+- **High-performanceCeph)
+- **Distributed filesystem** for high availability
 - **Git repositories** and build artifacts
-- **Redundant** storage design
-
+- **Scalable** and fault-tolerant storage
 ## 🔧 Configuration Files
 
 | File | Purpose | Target Servers |
@@ -150,12 +148,11 @@ Virtual IP (192.168.1.100)
 | `hosts` | Ansible inventory | All servers |
 | `load-balancer.yaml` | HAProxy + Keepalived | lb1, lb2 |
 | `databases.yaml` | PostgreSQL HA | db1, db2 |
-| `redis-cluster.yaml` | Redis replication | app1, app2, app3 |
-| `minio-cluster.yaml` | MinIO distributed | runner1, runner2, runner3 |
-| `gitlab.yaml` | GitLab application | app1, app2, app3 |
-| `gitlab-runner.yaml` | CI/CD runners | runner1, runner2, runner3 |
-| `nfs-server.yaml` | Shared storage | nfs1 |
-| `start_script.sh` | Automated deployment | Control machine |
+| `redis-cluster.yaml` | Redis replication | app1, app2 |
+| `minio-cluster.yaml` | MinIO distributed | runner1, r |
+| `minio-cluster.yaml` | MinIO distributed | runner1, runner2 |
+| `gitlab.yaml` | GitLab application | app1, app2 |
+| `gitlab-runner.yaml` | CI/CD runners | runner1, runner2| Control machine |
 
 ## 🔒 Security Features
 
@@ -177,7 +174,7 @@ Virtual IP (192.168.1.100)
 
 - **Database backups** configured
 - **GitLab backup** integration
-- **NFS shared storage** for consistency
+- **Ceph shared storage** for consistency
 - **MinIO data** persistence
 - **Automated backup** scripts ready
 
@@ -195,7 +192,6 @@ Virtual IP (192.168.1.100)
 
 ### Troubleshooting
 - Check HAProxy stats for load distribution
-- Verify NFS mounts on application servers
 - Monitor Docker container logs
 - Use Ansible ad-hoc commands for diagnostics
 

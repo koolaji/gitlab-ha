@@ -38,13 +38,10 @@ ansible-playbook -i hosts redis-cluster.yaml
 echo "📦 Step 4: Deploying MinIO Cluster..."
 ansible-playbook -i hosts minio-cluster.yaml
 
-echo "📁 Step 5: Deploying NFS Server..."
-ansible-playbook -i hosts nfs-server.yaml
-
-echo "🦊 Step 6: Deploying GitLab Applications..."
+echo "🦊 Step 5: Deploying GitLab Applications..."
 ansible-playbook -i hosts gitlab.yaml
 
-echo "🏃 Step 7: Deploying GitLab Runners..."
+echo "🏃 Step 6: Deploying GitLab Runners..."
 ansible-playbook -i hosts gitlab-runner.yaml
 
 echo "✅ GitLab HA Deployment Complete!"

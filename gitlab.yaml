@@ -16,7 +16,6 @@
           - htop
           - net-tools
           - vim
-          - nfs-common
         state: present
         update_cache: yes
 
@@ -47,22 +46,6 @@
         - "{{ project_dir }}/data"
         - "/srv/gitlab/shared"
         - "/srv/gitlab/builds"
-
-    - name: Mount NFS shared storage
-      mount:
-        path: /srv/gitlab/shared
-        src: "{{ hostvars[groups['nfs'][0]]['ansible_default_ipv4']['address'] }}:/srv/gitlab/shared"
-        fstype: nfs
-        opts: rw,sync,hard,intr,rsize=1048576,wsize=1048576,timeo=14
-        state: mounted
-
-    - name: Mount NFS builds storage
-      mount:
-        path: /srv/gitlab/builds
-        src: "{{ hostvars[groups['nfs'][0]]['ansible_default_ipv4']['address'] }}:/srv/gitlab/builds"
-        fstype: nfs
-        opts: rw,sync,hard,intr,rsize=1048576,wsize=1048576,timeo=14
-        state: mounted
 
     - name: Create GitLab configuration
       copy:
@@ -114,7 +97,7 @@
           gitlab_rails['object_store']['objects']['dependency_proxy']['bucket'] = 'gitlab-packages'
           gitlab_rails['object_store']['objects']['terraform_state']['bucket'] = 'gitlab-packages'
           
-          # NFS shared storage
+          # Shared storage
           gitlab_rails['shared_path'] = '/srv/gitlab/shared'
           gitlab_ci['builds_directory'] = '/srv/gitlab/builds'
           

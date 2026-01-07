@@ -9,25 +9,18 @@ db2 ansible_host=192.168.1.31 ansible_user=ubuntu db_role=replica
 [redis]
 app1 ansible_host=192.168.1.10 ansible_user=ubuntu redis_role=master
 app2 ansible_host=192.168.1.20 ansible_user=ubuntu redis_role=slave
-app3 ansible_host=192.168.1.21 ansible_user=ubuntu redis_role=slave
 
 [minio]
 runner1 ansible_host=192.168.1.90 ansible_user=ubuntu
 runner2 ansible_host=192.168.1.91 ansible_user=ubuntu
-runner3 ansible_host=192.168.1.92 ansible_user=ubuntu
-
-[nfs]
-nfs1 ansible_host=192.168.1.50 ansible_user=ubuntu
 
 [runners]
 runner1 ansible_host=192.168.1.90 ansible_user=ubuntu
 runner2 ansible_host=192.168.1.91 ansible_user=ubuntu
-runner3 ansible_host=192.168.1.92 ansible_user=ubuntu
 
 [gitlab_apps]
 app1 ansible_host=192.168.1.10 ansible_user=ubuntu
 app2 ansible_host=192.168.1.20 ansible_user=ubuntu
-app3 ansible_host=192.168.1.21 ansible_user=ubuntu
 
 [all:vars]
 ansible_ssh_private_key_file=~/.ssh/id_rsa
